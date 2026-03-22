@@ -4,17 +4,17 @@
  *
  * Cross-platform (Windows, macOS, Linux)
  *
- * Replaces the per-edit format and typecheck hooks. Records each edited
- * JS/TS file path to a session-scoped temp file. The stop-format-typecheck
- * hook reads this list at the end of the response and runs format +
- * typecheck once across all edited files — eliminating per-edit latency.
+ * Records each edited JS/TS path to a session-scoped temp file (one path per
+ * line). stop-format-typecheck.js reads this list at Stop time and runs format
+ * + typecheck once across all edited files, eliminating per-edit latency.
  *
- * This hook is intentionally cheap: it only appends a path to a JSON file
- * and exits immediately (no formatters, no tsc invocations).
+ * appendFileSync is used so concurrent Edit hook processes write atomically
+ * without overwriting each other. Deduplication is deferred to the Stop hook.
  */
 
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -22,20 +22,13 @@ const path = require('path');
 const MAX_STDIN = 1024 * 1024;
 
 function getAccumFile() {
-  const sessionId = process.env.CLAUDE_SESSION_ID || 'default';
+  const sessionId =
+    process.env.CLAUDE_SESSION_ID ||
+    crypto.createHash('sha1').update(process.cwd()).digest('hex').slice(0, 12);
   return path.join(os.tmpdir(), `ecc-edited-${sessionId}.txt`);
 }
 
 /**
- * Append file_path to the session accumulator (one path per line).
- *
- * Using appendFileSync makes each write atomic at the OS level, so
- * concurrent hook processes (from parallel Edit calls) cannot race and
- * overwrite each other's entries. Deduplication is deferred to the Stop
- * hook when it reads the full list.
- *
- * Exported so run-with-flags.js can call directly without spawning a child.
- *
  * @param {string} rawInput - Raw JSON string from stdin
  * @returns {string} The original input (pass-through)
  */
@@ -43,33 +36,23 @@ function run(rawInput) {
   try {
     const input = JSON.parse(rawInput);
     const filePath = input.tool_input?.file_path;
-
     if (filePath && /\.(ts|tsx|js|jsx)$/.test(filePath)) {
-      // appendFileSync is atomic for small writes — safe under concurrency
       fs.appendFileSync(getAccumFile(), filePath + '\n', 'utf8');
     }
   } catch {
     // Invalid input — pass through
   }
-
   return rawInput;
 }
 
-// ── stdin entry point ────────────────────────────────────────────
 if (require.main === module) {
   let data = '';
   process.stdin.setEncoding('utf8');
-
   process.stdin.on('data', chunk => {
-    if (data.length < MAX_STDIN) {
-      const remaining = MAX_STDIN - data.length;
-      data += chunk.substring(0, remaining);
-    }
+    if (data.length < MAX_STDIN) data += chunk.substring(0, MAX_STDIN - data.length);
   });
-
   process.stdin.on('end', () => {
-    data = run(data);
-    process.stdout.write(data);
+    process.stdout.write(run(data));
     process.exit(0);
   });
 }
