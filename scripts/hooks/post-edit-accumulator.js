@@ -22,9 +22,12 @@ const path = require('path');
 const MAX_STDIN = 1024 * 1024;
 
 function getAccumFile() {
-  const sessionId =
+  const raw =
     process.env.CLAUDE_SESSION_ID ||
     crypto.createHash('sha1').update(process.cwd()).digest('hex').slice(0, 12);
+  // Strip path separators and traversal sequences so the value is safe to embed
+  // directly in a filename regardless of what CLAUDE_SESSION_ID contains.
+  const sessionId = raw.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
   return path.join(os.tmpdir(), `ecc-edited-${sessionId}.txt`);
 }
 
